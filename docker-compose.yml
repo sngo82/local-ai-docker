@@ -1,0 +1,100 @@
+services:
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: litellm
+    ports:
+      - "4000:4000"
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:-sk-1234567890abcdef}
+      - DATABASE_URL=postgresql://litellm_user:litellm_password@postgres:5432/litellm
+    volumes:
+      - ./litellm_config.yml:/app/config.yml
+    command: ["--config", "/app/config.yml", "--port", "4000", "--num_workers", "1"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      lunchmoney-mcp:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://localhost:4000', timeout=10)"]
+      interval: 10s
+      timeout: 15s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - litellm-network
+
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: openwebui
+    ports:
+      - "3000:8080"
+    environment:
+      - OPENAI_API_BASE_URL=http://litellm:4000/v1
+      - OPENAI_API_KEY=${LITELLM_MASTER_KEY:-sk-1234567890abcdef}
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-secret-key-change-me}
+    volumes:
+      - open-webui:/app/backend/data
+    depends_on:
+      litellm:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - litellm-network
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres
+    environment:
+      - POSTGRES_DB=litellm
+      - POSTGRES_USER=litellm_user
+      - POSTGRES_PASSWORD=litellm_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litellm_user -d litellm"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - litellm-network
+
+  lunchmoney-mcp:
+    image: supercorp/supergateway
+    container_name: lunchmoney-mcp
+    environment:
+      - LUNCHMONEY_TOKEN=${LUNCHMONEY_TOKEN}
+    command: ["--stdio", "npx -y lunchmoney-mcp-server", "--port", "8000"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "const req = require('http').get('http://localhost:8000/sse', res => process.exit(res.statusCode === 200 ? 0 : 1)); req.on('error', () => process.exit(1)); req.setTimeout(10000, () => { req.destroy(); process.exit(1); })"]
+      interval: 10s
+      timeout: 15s
+      retries: 5
+    ports:
+      - "3001:8000"
+    networks:
+      - litellm-network
+
+  mcpo:
+    image: ghcr.io/open-webui/mcpo:main
+    container_name: mcpo
+    environment:
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:-sk-1234567890abcdef}
+    command: ["--port", "8000", "--server-type", "streamable_http", "--header", "{\"Authorization\": \"Bearer ${LITELLM_MASTER_KEY}\"}", "--", "http://litellm:4000/mcp"]
+    depends_on:
+      litellm:
+        condition: service_healthy
+    ports:
+      - "3456:8000"
+    networks:
+      - litellm-network
+
+volumes:
+  open-webui:
+  postgres_data:
+
+networks:
+  litellm-network:
+    driver: bridge
